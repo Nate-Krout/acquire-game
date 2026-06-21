@@ -1,4 +1,17 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import { createClient } from "@supabase/supabase-js";
+
+const supabase = createClient(
+  "https://fkzqjoecqttpuvhjgtvl.supabase.co",
+  "sb_publishable_-CAhEP0sH9sz39FNAIp2og_mru3kO_6"
+);
+
+function makeRoomCode() {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no ambiguous chars
+  let code = "";
+  for (let i = 0; i < 5; i++) code += chars[Math.floor(Math.random() * chars.length)];
+  return code;
+}
 
 // ─── CONSTANTS ───────────────────────────────────────────────────────────────
 const CHAINS = ["Luxor","Tower","American","Festival","Worldwide","Continental","Imperial"];
@@ -505,6 +518,70 @@ export default function AcquireGame() {
   const [showScoreboard, setShowScoreboard] = useState(false);
   const [playerActions, setPlayerActions] = useState({}); // playerIndex → {tile, stocks}
 
+  // ── Multiplayer room state ──────────────────────────────────────────────────
+  const [roomCode, setRoomCode] = useState(null);
+  const [myPlayerIndex, setMyPlayerIndex] = useState(null); // which seat this device controls
+  const [connectionStatus, setConnectionStatus] = useState("idle"); // idle | connecting | connected | error
+  const gameRef = useRef(null); // mirrors `game` for use inside callbacks without stale closures
+  gameRef.current = game;
+
+  // Write a new game state to Supabase. Every device's realtime subscription (including
+  // our own) will receive the update and call setGame — so we don't need to setGame here too,
+  // though we do it anyway for instant local feedback before the round-trip completes.
+  async function syncGame(newGameOrUpdater) {
+    const current = gameRef.current;
+    const next = typeof newGameOrUpdater === "function" ? newGameOrUpdater(current) : newGameOrUpdater;
+    if (!next) return;
+    setGame(next); // optimistic local update
+    if (!roomCode) return; // not in multiplayer mode (shouldn't happen, but safe)
+    const { error } = await supabase
+      .from("games")
+      .update({ state: next, updated_at: new Date().toISOString() })
+      .eq("room_code", roomCode);
+    if (error) console.error("Supabase sync error:", error);
+  }
+
+  // Subscribe to realtime updates for our room
+  useEffect(() => {
+    if (!roomCode) return;
+    const channel = supabase
+      .channel(`room-${roomCode}`)
+      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "games", filter: `room_code=eq.${roomCode}` },
+        (payload) => {
+          const incoming = payload.new.state;
+          // Avoid redundant re-renders if it's literally the same object we just wrote
+          setGame(incoming);
+        }
+      )
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, [roomCode]);
+
+  async function createRoom(playerSetup) {
+    setConnectionStatus("connecting");
+    const code = makeRoomCode();
+    const initialState = initGame(playerSetup);
+    const { error } = await supabase.from("games").insert({ room_code: code, state: initialState });
+    if (error) { console.error(error); setConnectionStatus("error"); return; }
+    setRoomCode(code);
+    setMyPlayerIndex(0); // creator is always seat 0
+    setGame(initialState);
+    setSetup(playerSetup);
+    setConnectionStatus("connected");
+  }
+
+  async function joinRoom(code, seatIndex) {
+    setConnectionStatus("connecting");
+    const { data, error } = await supabase.from("games").select("*").eq("room_code", code).single();
+    if (error || !data) { setConnectionStatus("error"); return false; }
+    setRoomCode(code);
+    setMyPlayerIndex(seatIndex);
+    setGame(data.state);
+    setSetup(data.state.players);
+    setConnectionStatus("connected");
+    return true;
+  }
+
   function pushTileAction(text, color, playerIndex) {
     setPlayerActions(a => ({ ...a, [playerIndex]: { ...a[playerIndex], tile: { text, color: color || "#ccc" }, stocks: null } }));
   }
@@ -517,13 +594,16 @@ export default function AcquireGame() {
   }
 
   // ── AI Turn Driver ──────────────────────────────────────────────────────────
+  // Only seat 0 (the room creator/host) runs AI logic and auto-advances —
+  // otherwise every connected device would race to make the same AI move.
   useEffect(() => {
     if (!game || game.phase === "gameOver") return;
+    if (myPlayerIndex !== 0) return; // not the host — let the host's browser drive AI turns
 
     // No stockholders in defunct chain — auto-advance regardless of who triggered the merger
     if (game.phase === "merger" && game.mergerInfo?.playerIndex == null) {
       const advanced = advanceAfterDefunct(game, game.mergerInfo.defunct, game.mergerInfo.survivor, [...game.money], game.stocks.map(s => ({ ...s })), { ...game.stockBank });
-      setGame(advanced.g);
+      syncGame(advanced.g);
       return;
     }
 
@@ -532,7 +612,7 @@ export default function AcquireGame() {
       const pi = game.mergerInfo.playerIndex;
       if ((game.stocks[pi]?.[game.mergerInfo.defunct] || 0) === 0) {
         const result = applyMergerChoice(game, 0, 0);
-        setGame(result.g);
+        syncGame(result.g);
         return;
       }
     }
@@ -554,7 +634,7 @@ export default function AcquireGame() {
     setAiThinking(true);
     const timer = setTimeout(() => {
       const nextGame = runAiTurn(game);
-      setGame(nextGame);
+      syncGame(nextGame);
       setAiThinking(false);
     }, 900);
     return () => clearTimeout(timer);
@@ -886,7 +966,7 @@ export default function AcquireGame() {
   function handlePlaceTile() {
     if (selectedTile === null) return;
     const result = applyPlaceTile(game, selectedTile);
-    setGame(result.g);
+    syncGame(result.g);
     if (result.toast) pushTileAction(result.toast.text, result.toast.color, game.currentPlayer);
     setSelectedTile(null);
     setAnimTile(selectedTile);
@@ -895,7 +975,7 @@ export default function AcquireGame() {
 
   function handleFoundChain(chain) {
     const result = applyFoundChain(game, chain);
-    setGame(result.g);
+    syncGame(result.g);
     if (result.toast) pushTileAction(result.toast.text, result.toast.color, game.currentPlayer);
     setSelectedChain(null);
   }
@@ -903,7 +983,7 @@ export default function AcquireGame() {
   function handleBuyStocks(cart, endAfter = false) {
     const result = applyBuyStocks(game, cart);
     const nextGame = endAfter ? finishGame(result.g) : result.g;
-    setGame(nextGame);
+    syncGame(nextGame);
     if (result.toast) pushStockAction(result.toast.text, result.toast.color, game.currentPlayer);
   }
 
@@ -913,26 +993,26 @@ export default function AcquireGame() {
     const shares = game.stocks[mi.playerIndex][mi.defunct] || 0;
     if (total > shares) return;
     const result = applyMergerChoice(game, mergerChoice.sell || 0, Math.floor((mergerChoice.trade || 0) / 2) * 2);
-    setGame(result.g);
+    syncGame(result.g);
     if (result.toast) pushToast(result.toast.text, result.toast.color, mi.playerIndex);
     setMergerChoice({ sell: 0, trade: 0 });
   }
 
   function handleDismissAnnouncement() {
     const result = applyDismissAnnouncement(game);
-    setGame(result.g);
+    syncGame(result.g);
     if (result.toast) pushToast(result.toast.text, result.toast.color, game.currentPlayer);
   }
 
   function handleChooseSurvivor(survivor) {
     const result = applyChooseSurvivor(game, survivor);
-    setGame(result.g);
+    syncGame(result.g);
     if (result.toast) pushTileAction(result.toast.text, result.toast.color, game.currentPlayer);
   }
 
   function handleRevealDead(tile) {
     // Reveal the dead tile to all players, wait for confirm to discard
-    setGame(g => ({ ...g, phase: "revealDead", deadTile: tile }));
+    syncGame(g => ({ ...g, phase: "revealDead", deadTile: tile }));
     pushTileAction(`Dead tile revealed: ${tileLabel(tile)}`, "#e74c3c", game.currentPlayer);
   }
 
@@ -946,29 +1026,54 @@ export default function AcquireGame() {
       const without = h.filter(t => t !== tile);
       return newTile !== undefined ? [...without, newTile] : without;
     });
-    setGame(g => ({ ...g, phase: "placeTile", deadTile: null, hands: newHands, deck: newDeck }));
+    syncGame(g => ({ ...g, phase: "placeTile", deadTile: null, hands: newHands, deck: newDeck }));
     pushTileAction(`Drew replacement for dead tile`, "#888", pi);
   }
 
   function handleEndGame() {
-    setGame(g => finishGame(g));
+    syncGame(g => finishGame(g));
   }
 
-  // ── Setup Screen ─────────────────────────────────────────────────────────────
-  if (!setup) return <SetupScreen onStart={cfg => { setSetup(cfg); setGame(initGame(cfg)); }} />;
-  if (!game) return null;
+  // ── Lobby / Room flow ─────────────────────────────────────────────────────────
+  if (!roomCode) {
+    return (
+      <LobbyScreen
+        onCreate={createRoom}
+        onJoin={joinRoom}
+        connectionStatus={connectionStatus}
+      />
+    );
+  }
+  if (!game) {
+    return (
+      <div style={{ ...styles.root, display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <div style={{ color: "#888", fontSize: 14 }}>Connecting to room {roomCode}…</div>
+      </div>
+    );
+  }
 
   const cp = game.currentPlayer;
   const cpPlayer = game.players[cp];
-  const isHuman = cpPlayer?.type === "human";
+  // Determine who is acting right now — accounts for merger resolution having a different actor than currentPlayer
+  const actingIndex = (game.phase === "merger" && game.mergerInfo?.playerIndex != null)
+    ? game.mergerInfo.playerIndex
+    : cp;
+  // "isHuman" here means: is THIS device's seat the one currently allowed to act
+  const isHuman = actingIndex === myPlayerIndex && game.players[actingIndex]?.type === "human";
 
   return (
     <div style={styles.root}>
       <div style={styles.header}>
-        <span style={styles.logo}>ACQUIRE</span>
+        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+          <span style={styles.logo}>ACQUIRE</span>
+          <span style={{ fontSize: 11, color: "#666", border: "1px solid #2a2a3a", borderRadius: 4, padding: "3px 8px", letterSpacing: 2 }}>
+            ROOM <span style={{ color: "#f4c542", fontWeight: 700 }}>{roomCode}</span>
+          </span>
+          <span style={{ fontSize: 11, color: "#555" }}>You are: <span style={{ color: "#2ecc71" }}>{game.players[myPlayerIndex]?.name}</span></span>
+        </div>
         <div style={styles.headerRight}>
           <button style={styles.btnSecondary} onClick={() => setShowScoreboard(s => !s)}>📊 Scores</button>
-          <button style={styles.btnSecondary} onClick={() => { setGame(null); setSetup(null); }}>↩ Menu</button>
+          <button style={styles.btnSecondary} onClick={() => { setGame(null); setSetup(null); setRoomCode(null); setMyPlayerIndex(null); }}>↩ Menu</button>
         </div>
       </div>
 
@@ -1512,7 +1617,94 @@ function PlayerActionLog({ game, playerActions }) {
 }
 
 // ─── SETUP SCREEN ─────────────────────────────────────────────────────────────
-function SetupScreen({ onStart }) {
+// ─── LOBBY SCREEN ─────────────────────────────────────────────────────────────
+function LobbyScreen({ onCreate, onJoin, connectionStatus }) {
+  const [mode, setMode] = useState(null); // null | "create" | "join"
+  const [joinCode, setJoinCode] = useState("");
+  const [joinSeats, setJoinSeats] = useState(null); // seats fetched after entering a valid code
+  const [joinError, setJoinError] = useState("");
+
+  if (mode === "create") {
+    return <SetupScreen onStart={onCreate} onBack={() => setMode(null)} multiplayer />;
+  }
+
+  if (mode === "join") {
+    return (
+      <div style={{ ...styles.root, display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <div style={styles.setupCard}>
+          <div style={{ textAlign: "center", marginBottom: 20 }}>
+            <div style={{ fontSize: 36, fontWeight: 900, letterSpacing: 6, color: "#f4c542", fontFamily: "Georgia, serif" }}>JOIN GAME</div>
+          </div>
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ fontSize: 12, color: "#888", marginBottom: 6 }}>Room code</div>
+            <input
+              value={joinCode}
+              onChange={e => setJoinCode(e.target.value.toUpperCase())}
+              placeholder="ABCDE"
+              maxLength={5}
+              style={{ ...styles.input, width: "100%", fontSize: 24, textAlign: "center", letterSpacing: 6, padding: "12px 0" }}
+            />
+          </div>
+          {joinError && <div style={{ color: "#e74c3c", fontSize: 12, marginBottom: 10 }}>{joinError}</div>}
+          <button
+            style={{ ...styles.btnPrimary, width: "100%", marginBottom: 10, opacity: joinCode.length === 5 ? 1 : 0.4 }}
+            disabled={joinCode.length !== 5 || connectionStatus === "connecting"}
+            onClick={async () => {
+              setJoinError("");
+              // Fetch the room to show seat picker
+              const { data, error } = await supabase.from("games").select("*").eq("room_code", joinCode).single();
+              if (error || !data) { setJoinError("Room not found. Check the code and try again."); return; }
+              setJoinSeats(data.state.players);
+            }}
+          >
+            {connectionStatus === "connecting" ? "Connecting…" : "Find Room"}
+          </button>
+          <button style={{ ...styles.btnSecondary, width: "100%" }} onClick={() => { setMode(null); setJoinSeats(null); setJoinError(""); }}>← Back</button>
+
+          {joinSeats && (
+            <div style={{ marginTop: 16, borderTop: "1px solid #1a2a1a", paddingTop: 14 }}>
+              <div style={{ fontSize: 12, color: "#888", marginBottom: 8 }}>Which seat are you?</div>
+              {joinSeats.map((p, i) => (
+                <button key={i}
+                  disabled={p.type !== "human"}
+                  style={{
+                    ...styles.tileBtn, width: "100%", marginBottom: 6, padding: "10px 12px",
+                    opacity: p.type === "human" ? 1 : 0.3,
+                    background: p.type === "human" ? "#1a3d28" : "#222",
+                    border: p.type === "human" ? "1px solid #2ecc71" : "1px solid #333",
+                    color: p.type === "human" ? "#2ecc71" : "#666",
+                    fontSize: 14, cursor: p.type === "human" ? "pointer" : "not-allowed",
+                  }}
+                  onClick={() => onJoin(joinCode, i)}
+                >
+                  {p.name} {p.type === "ai" ? `(AI — ${p.difficulty})` : ""}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ ...styles.root, display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <div style={styles.setupCard}>
+        <div style={{ textAlign: "center", marginBottom: 28 }}>
+          <div style={{ fontSize: 48, fontWeight: 900, letterSpacing: 8, color: "#f4c542", fontFamily: "Georgia, serif" }}>ACQUIRE</div>
+          <div style={{ color: "#888", fontSize: 13, marginTop: 4 }}>The Classic Hotel Investment Game</div>
+        </div>
+        <button style={{ ...styles.btnPrimary, width: "100%", fontSize: 16, padding: "14px 0", marginBottom: 10 }} onClick={() => setMode("create")}>
+          Create Game
+        </button>
+        <button style={{ ...styles.btnSecondary, width: "100%", fontSize: 16, padding: "14px 0" }} onClick={() => setMode("join")}>
+          Join Game
+        </button>
+      </div>
+    </div>
+  );
+}
+function SetupScreen({ onStart, onBack, multiplayer }) {
   const [players, setPlayers] = useState([
     { name: "You", type: "human", difficulty: null },
     { name: "HAL", type: "ai", difficulty: "hobbyist" },
@@ -1542,6 +1734,11 @@ function SetupScreen({ onStart }) {
           <div style={{ fontSize: 48, fontWeight: 900, letterSpacing: 8, color: "#f4c542", fontFamily: "Georgia, serif" }}>ACQUIRE</div>
           <div style={{ color: "#888", fontSize: 13, marginTop: 4 }}>The Classic Hotel Investment Game</div>
         </div>
+        {multiplayer && (
+          <div style={{ fontSize: 11, color: "#888", marginBottom: 14, lineHeight: 1.5, background: "#0d1a0d", border: "1px solid #1a2a1a", borderRadius: 4, padding: "8px 10px" }}>
+            Add a "Human" slot for each person who'll join from their own phone. You'll be seat 1 automatically. Others pick their seat after entering the room code.
+          </div>
+        )}
         <div style={{ marginBottom: 16 }}>
           {players.map((p, i) => (
             <div key={i} style={{ display: "flex", gap: 8, marginBottom: 8, alignItems: "center" }}>
@@ -1570,7 +1767,12 @@ function SetupScreen({ onStart }) {
           🔴 Pro — hunts majorities, trades on mergers
         </div>
         {players.length < 6 && <button style={{ ...styles.btnSecondary, width: "100%", marginBottom: 12 }} onClick={addPlayer}>+ Add Player</button>}
-        <button style={{ ...styles.btnPrimary, width: "100%", fontSize: 16, padding: "12px 0" }} onClick={() => onStart(players)}>Start Game</button>
+        <button style={{ ...styles.btnPrimary, width: "100%", fontSize: 16, padding: "12px 0", marginBottom: multiplayer ? 10 : 0 }} onClick={() => onStart(players)}>
+          {multiplayer ? "Create Room" : "Start Game"}
+        </button>
+        {multiplayer && onBack && (
+          <button style={{ ...styles.btnSecondary, width: "100%" }} onClick={onBack}>← Back</button>
+        )}
       </div>
     </div>
   );
