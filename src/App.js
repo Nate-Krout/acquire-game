@@ -564,12 +564,10 @@ export default function AcquireGame() {
     const { error } = await supabase.from("games").insert({ room_code: code, state: initialState });
     if (error) { console.error(error); setConnectionStatus("error"); return; }
     setRoomCode(code);
-    setMyPlayerIndex(0); // creator always occupies the seat they configured as themselves (seat 0 in setup)
+    setMyPlayerIndex(0); // creator is always seat 0
     setGame(initialState);
     setSetup(playerSetup);
     setConnectionStatus("connected");
-    // Note: who goes FIRST each game is randomized independently in initGame() via currentPlayer —
-    // being the creator (seat 0) does not mean going first.
   }
 
   async function joinRoom(code, seatIndex) {
@@ -960,15 +958,13 @@ export default function AcquireGame() {
   // ── Event Handlers ──────────────────────────────────────────────────────────
   function handleTileClick(tile) {
     if (!game || game.phase !== "placeTile") return;
-    if (game.currentPlayer !== myPlayerIndex) return; // not your turn
     if (game.players[game.currentPlayer].type === "ai") return;
-    if (!game.hands[myPlayerIndex].includes(tile)) return;
+    if (!game.hands[game.currentPlayer].includes(tile)) return;
     setSelectedTile(tile);
   }
 
   function handlePlaceTile() {
     if (selectedTile === null) return;
-    if (game.currentPlayer !== myPlayerIndex) return; // not your turn
     const result = applyPlaceTile(game, selectedTile);
     syncGame(result.g);
     if (result.toast) pushTileAction(result.toast.text, result.toast.color, game.currentPlayer);
@@ -978,7 +974,6 @@ export default function AcquireGame() {
   }
 
   function handleFoundChain(chain) {
-    if (game.currentPlayer !== myPlayerIndex) return;
     const result = applyFoundChain(game, chain);
     syncGame(result.g);
     if (result.toast) pushTileAction(result.toast.text, result.toast.color, game.currentPlayer);
@@ -986,7 +981,6 @@ export default function AcquireGame() {
   }
 
   function handleBuyStocks(cart, endAfter = false) {
-    if (game.currentPlayer !== myPlayerIndex) return;
     const result = applyBuyStocks(game, cart);
     const nextGame = endAfter ? finishGame(result.g) : result.g;
     syncGame(nextGame);
@@ -995,7 +989,6 @@ export default function AcquireGame() {
 
   function handleMergerConfirm() {
     const mi = game.mergerInfo;
-    if (mi.playerIndex !== myPlayerIndex) return; // not your seat's merger to resolve
     const total = (mergerChoice.sell || 0) + (mergerChoice.trade || 0);
     const shares = game.stocks[mi.playerIndex][mi.defunct] || 0;
     if (total > shares) return;
@@ -1006,28 +999,24 @@ export default function AcquireGame() {
   }
 
   function handleDismissAnnouncement() {
-    if (game.currentPlayer !== myPlayerIndex) return;
     const result = applyDismissAnnouncement(game);
     syncGame(result.g);
     if (result.toast) pushToast(result.toast.text, result.toast.color, game.currentPlayer);
   }
 
   function handleChooseSurvivor(survivor) {
-    if (game.currentPlayer !== myPlayerIndex) return;
     const result = applyChooseSurvivor(game, survivor);
     syncGame(result.g);
     if (result.toast) pushTileAction(result.toast.text, result.toast.color, game.currentPlayer);
   }
 
   function handleRevealDead(tile) {
-    if (game.currentPlayer !== myPlayerIndex) return;
     // Reveal the dead tile to all players, wait for confirm to discard
     syncGame(g => ({ ...g, phase: "revealDead", deadTile: tile }));
     pushTileAction(`Dead tile revealed: ${tileLabel(tile)}`, "#e74c3c", game.currentPlayer);
   }
 
   function handleConfirmDead() {
-    if (game.currentPlayer !== myPlayerIndex) return;
     const tile = game.deadTile;
     const pi = game.currentPlayer;
     const newDeck = [...game.deck];
@@ -1091,15 +1080,15 @@ export default function AcquireGame() {
       <div style={styles.body}>
         {/* Board */}
         <div style={styles.boardWrap}>
-          <Board game={game} selectedTile={selectedTile} onTileClick={handleTileClick} animTile={animTile} myPlayerIndex={myPlayerIndex} />
+          <Board game={game} selectedTile={selectedTile} onTileClick={handleTileClick} animTile={animTile} />
           <ChainLegend chainSizes={game.chainSizes} stockBank={game.stockBank} />
         </div>
 
         {/* Sidebar */}
         <div style={styles.sidebar}>
-          {showScoreboard && <Scoreboard game={game} onClose={() => setShowScoreboard(false)} myPlayerIndex={myPlayerIndex} />}
+          {showScoreboard && <Scoreboard game={game} onClose={() => setShowScoreboard(false)} />}
           <TurnPanel
-            game={game} isHuman={isHuman} myPlayerIndex={myPlayerIndex} aiThinking={aiThinking}
+            game={game} isHuman={isHuman} aiThinking={aiThinking}
             selectedTile={selectedTile} onTileClick={handleTileClick}
             onPlaceTile={handlePlaceTile}
             selectedChain={selectedChain} setSelectedChain={setSelectedChain}
@@ -1120,14 +1109,9 @@ export default function AcquireGame() {
 }
 
 // ─── BOARD ────────────────────────────────────────────────────────────────────
-function Board({ game, selectedTile, onTileClick, animTile, myPlayerIndex }) {
-  // Only reveal hand tiles if it's THIS device's own seat acting right now —
-  // never show another human player's hand, even when it's their turn.
-  const actingIndex = (game.phase === "merger" && game.mergerInfo?.playerIndex != null)
-    ? game.mergerInfo.playerIndex
-    : game.currentPlayer;
-  const isMySeatActing = actingIndex === myPlayerIndex && game.players[actingIndex]?.type === "human";
-  const inHand = isMySeatActing ? (game.hands[myPlayerIndex] || []) : [];
+function Board({ game, selectedTile, onTileClick, animTile }) {
+  const isHuman = game.players[game.currentPlayer]?.type === "human";
+  const inHand = isHuman ? (game.hands[game.currentPlayer] || []) : [];
   const [popup, setPopup] = useState(null); // { chain, x, y }
 
   return (
@@ -1270,13 +1254,11 @@ function ChainLegend({ chainSizes, stockBank }) {
 }
 
 // ─── TURN PANEL ───────────────────────────────────────────────────────────────
-function TurnPanel({ game, isHuman, myPlayerIndex, aiThinking, selectedTile, onTileClick, onPlaceTile, selectedChain, setSelectedChain, onFoundChain, onChooseSurvivor, onDismissAnnouncement, onRevealDead, onConfirmDead, onBuyStocks, mergerChoice, setMergerChoice, onMergerConfirm, onEndGame }) {
+function TurnPanel({ game, isHuman, aiThinking, selectedTile, onTileClick, onPlaceTile, selectedChain, setSelectedChain, onFoundChain, onChooseSurvivor, onDismissAnnouncement, onRevealDead, onConfirmDead, onBuyStocks, mergerChoice, setMergerChoice, onMergerConfirm, onEndGame }) {
   const cp = game.currentPlayer;
   const cpPlayer = game.players[cp];
-  // Only ever read hand/money for OUR OWN seat — never the acting player's seat directly,
-  // since in multiplayer the acting player might be a different human on a different device.
-  const hand = isHuman ? (game.hands[myPlayerIndex] || []) : [];
-  const money = isHuman ? game.money[myPlayerIndex] : (game.money[cp] || 0);
+  const hand = game.hands[cp] || [];
+  const money = game.money[cp];
 
   const [buyCart, setBuyCart] = useState({});
   const buyCartRef = useRef({});
@@ -1365,7 +1347,7 @@ function TurnPanel({ game, isHuman, myPlayerIndex, aiThinking, selectedTile, onT
       {isHuman && (
         <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 8 }}>
           {CHAINS.map(c => {
-            const n = (game.stocks[myPlayerIndex] && game.stocks[myPlayerIndex][c]) || 0;
+            const n = game.stocks[cp][c] || 0;
             return n > 0 ? (
               <span key={c} style={{ fontSize: 11, padding: "2px 6px", borderRadius: 4, background: CHAIN_COLORS[c] + "33", border: `1px solid ${CHAIN_COLORS[c]}88`, color: "#fff" }}>
                 {c.slice(0,3)} ×{n}
@@ -1465,25 +1447,18 @@ function TurnPanel({ game, isHuman, myPlayerIndex, aiThinking, selectedTile, onT
                 })}
               </div>
             )}
-            {game.currentPlayer === myPlayerIndex ? (
-              <button style={{ ...styles.btnPrimary, width: "100%" }} onClick={onDismissAnnouncement}>
-                {ann.holders.length > 0 ? "Resolve Stockholders →" : "Continue →"}
-              </button>
-            ) : (
-              <div style={{ color: "#888", fontSize: 12, textAlign: "center", padding: "8px 0" }}>
-                Waiting for {game.players[game.currentPlayer]?.name} to continue…
-              </div>
-            )}
+            <button style={{ ...styles.btnPrimary, width: "100%" }} onClick={onDismissAnnouncement}>
+              {ann.holders.length > 0 ? "Resolve Stockholders →" : "Continue →"}
+            </button>
           </div>
         );
       })()}
 
       {game.phase === "merger" && game.mergerInfo && (() => {
         const mi = game.mergerInfo;
-        // Only this device's own seat can see/control the merger resolution sliders
-        const isMine = mi.playerIndex != null && mi.playerIndex === myPlayerIndex && game.players[mi.playerIndex]?.type === "human";
+        const isMine = mi.playerIndex != null && game.players[mi.playerIndex]?.type === "human";
         const mergePlayer = game.players[mi.playerIndex];
-        const shares = isMine ? (game.stocks[myPlayerIndex]?.[mi.defunct] || 0) : 0;
+        const shares = game.stocks[mi.playerIndex]?.[mi.defunct] || 0;
         const price = stockPrice(mi.defunct, game.chainSizes[mi.defunct]);
         const maxTrade = Math.floor(shares / 2) * 2;
         const survivorAvail = (game.stockBank[mi.survivor] || 0);
@@ -1569,33 +1544,24 @@ function TurnPanel({ game, isHuman, myPlayerIndex, aiThinking, selectedTile, onT
         </div>
       )}
 
-      {!isHuman && game.phase !== "gameOver" && (() => {
-        const actingIdx = (game.phase === "merger" && game.mergerInfo?.playerIndex != null)
-          ? game.mergerInfo.playerIndex
-          : game.currentPlayer;
-        const actingP = game.players[actingIdx];
-        const isAi = actingP?.type === "ai";
-        return (
-          <div style={{ color: "#888", fontSize: 13, textAlign: "center", padding: 12 }}>
-            {isAi
-              ? (aiThinking ? `🤖 ${actingP.name} is thinking…` : `🤖 ${actingP.name}'s turn…`)
-              : `Waiting for ${actingP?.name || "player"}…`}
-          </div>
-        );
-      })()}
+      {!isHuman && game.phase !== "gameOver" && (
+        <div style={{ color: "#888", fontSize: 13, textAlign: "center", padding: 12 }}>
+          {aiThinking ? "🤖 AI is thinking…" : "Waiting for AI…"}
+        </div>
+      )}
     </div>
   );
 }
 
 // ─── SCOREBOARD ───────────────────────────────────────────────────────────────
-function Scoreboard({ game, onClose, myPlayerIndex }) {
+function Scoreboard({ game, onClose }) {
+  const humanIndices = new Set(game.players.map((p, i) => p.type === "human" ? i : -1).filter(i => i >= 0));
   return (
     <div style={{ ...styles.panel, marginBottom: 8 }}>
       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
         <span style={{ fontWeight: 700, color: "#f4c542" }}>Scoreboard</span>
         <button style={{ background: "none", border: "none", color: "#888", cursor: "pointer" }} onClick={onClose}>✕</button>
       </div>
-      <div style={{ fontSize: 10, color: "#555", marginBottom: 6 }}>Only your own holdings are visible — others' are private until game end.</div>
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
         <thead>
           <tr>
@@ -1605,16 +1571,13 @@ function Scoreboard({ game, onClose, myPlayerIndex }) {
           </tr>
         </thead>
         <tbody>
-          {game.players.map((p, i) => {
-            const isMe = i === myPlayerIndex;
-            return (
-              <tr key={i} style={{ background: i === game.currentPlayer ? "#1a2a1a" : "transparent" }}>
-                <td style={styles.td}>{p.name}{isMe ? " (you)" : ""}</td>
-                <td style={styles.td}>{isMe ? `$${game.money[i].toLocaleString()}` : <span style={{ color: "#333" }}>—</span>}</td>
-                {CHAINS.map(c => <td key={c} style={styles.td}>{isMe ? (game.stocks[i][c] || 0) : <span style={{ color: "#333" }}>—</span>}</td>)}
-              </tr>
-            );
-          })}
+          {game.players.map((p, i) => (
+            <tr key={i} style={{ background: i === game.currentPlayer ? "#1a2a1a" : "transparent" }}>
+              <td style={styles.td}>{p.name}</td>
+              <td style={styles.td}>{humanIndices.has(i) ? `$${game.money[i].toLocaleString()}` : <span style={{ color: "#333" }}>—</span>}</td>
+              {CHAINS.map(c => <td key={c} style={styles.td}>{humanIndices.has(i) ? (game.stocks[i][c] || 0) : <span style={{ color: "#333" }}>—</span>}</td>)}
+            </tr>
+          ))}
         </tbody>
       </table>
     </div>
