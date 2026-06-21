@@ -479,23 +479,26 @@ function aiBuyStocks(playerMoney, chainSizes, stockBank, playerStocks, allStocks
 }
 
 // ─── GAME STATE INIT ──────────────────────────────────────────────────────────
-function initGame(playerSetup) {
+function initGame(playerSetup, startingMoney = 6000, startingPlayer = "random") {
   const deck = initDeck();
   const hands = playerSetup.map(() => deck.splice(0, 6));
   const stockBank = {};
   CHAINS.forEach(c => stockBank[c] = 25);
   const stocks = playerSetup.map(() => { const s = {}; CHAINS.forEach(c => s[c] = 0); return s; });
+  const firstPlayer = startingPlayer === "random"
+    ? Math.floor(Math.random() * playerSetup.length)
+    : startingPlayer;
   return {
     phase: "placeTile", // placeTile | foundChain | buyStocks | merger | gameOver
     players: playerSetup,
-    currentPlayer: Math.floor(Math.random() * playerSetup.length),
+    currentPlayer: firstPlayer,
     hands,
     board: {}, // tileId -> true
     chainMap: {}, // tileId -> chainName
     chainSizes: Object.fromEntries(CHAINS.map(c => [c, 0])),
     stockBank,
     stocks,
-    money: playerSetup.map(() => 6000),
+    money: playerSetup.map(() => startingMoney),
     deck,
     log: [],
     mergerQueue: [],
@@ -529,10 +532,12 @@ export default function AcquireGame() {
   // our own) will receive the update and call setGame — so we don't need to setGame here too,
   // though we do it anyway for instant local feedback before the round-trip completes.
   async function syncGame(newGameOrUpdater) {
+    // Always compute against the freshest known state at the moment of the call
     const current = gameRef.current;
     const next = typeof newGameOrUpdater === "function" ? newGameOrUpdater(current) : newGameOrUpdater;
     if (!next) return;
     setGame(next); // optimistic local update
+    gameRef.current = next; // keep ref immediately in sync so back-to-back calls in the same tick see this write
     if (!roomCode) return; // not in multiplayer mode (shouldn't happen, but safe)
     const { error } = await supabase
       .from("games")
@@ -557,16 +562,18 @@ export default function AcquireGame() {
     return () => { supabase.removeChannel(channel); };
   }, [roomCode]);
 
-  async function createRoom(playerSetup) {
+  async function createRoom(playerSetup, startingMoney = 6000, startingPlayer = "random") {
     setConnectionStatus("connecting");
     const code = makeRoomCode();
-    const initialState = initGame(playerSetup);
+    // Mark the creator's seat (0) as already claimed so it can't be picked by anyone else
+    const playersWithClaim = playerSetup.map((p, i) => ({ ...p, claimed: i === 0 }));
+    const initialState = initGame(playersWithClaim, startingMoney, startingPlayer);
     const { error } = await supabase.from("games").insert({ room_code: code, state: initialState });
     if (error) { console.error(error); setConnectionStatus("error"); return; }
     setRoomCode(code);
-    setMyPlayerIndex(0); // creator is always seat 0
+    setMyPlayerIndex(0); // creator always occupies the seat they configured as themselves (seat 0 in setup)
     setGame(initialState);
-    setSetup(playerSetup);
+    setSetup(playersWithClaim);
     setConnectionStatus("connected");
   }
 
@@ -574,10 +581,19 @@ export default function AcquireGame() {
     setConnectionStatus("connecting");
     const { data, error } = await supabase.from("games").select("*").eq("room_code", code).single();
     if (error || !data) { setConnectionStatus("error"); return false; }
+    // Re-check the seat hasn't been claimed by someone else between fetch and click (race protection)
+    if (data.state.players[seatIndex]?.claimed) {
+      setConnectionStatus("error");
+      return false;
+    }
+    const updatedPlayers = data.state.players.map((p, i) => i === seatIndex ? { ...p, claimed: true } : p);
+    const updatedState = { ...data.state, players: updatedPlayers };
+    const { error: updateError } = await supabase.from("games").update({ state: updatedState }).eq("room_code", code);
+    if (updateError) { console.error(updateError); setConnectionStatus("error"); return false; }
     setRoomCode(code);
     setMyPlayerIndex(seatIndex);
-    setGame(data.state);
-    setSetup(data.state.players);
+    setGame(updatedState);
+    setSetup(updatedPlayers);
     setConnectionStatus("connected");
     return true;
   }
@@ -633,7 +649,9 @@ export default function AcquireGame() {
 
     setAiThinking(true);
     const timer = setTimeout(() => {
-      const nextGame = runAiTurn(game);
+      const freshGame = gameRef.current; // avoid acting on a stale closure if state moved since this effect fired
+      if (!freshGame) { setAiThinking(false); return; }
+      const nextGame = runAiTurn(freshGame);
       syncGame(nextGame);
       setAiThinking(false);
     }, 900);
@@ -958,13 +976,15 @@ export default function AcquireGame() {
   // ── Event Handlers ──────────────────────────────────────────────────────────
   function handleTileClick(tile) {
     if (!game || game.phase !== "placeTile") return;
+    if (game.currentPlayer !== myPlayerIndex) return; // not your turn
     if (game.players[game.currentPlayer].type === "ai") return;
-    if (!game.hands[game.currentPlayer].includes(tile)) return;
+    if (!game.hands[myPlayerIndex].includes(tile)) return;
     setSelectedTile(tile);
   }
 
   function handlePlaceTile() {
     if (selectedTile === null) return;
+    if (game.currentPlayer !== myPlayerIndex) return; // not your turn
     const result = applyPlaceTile(game, selectedTile);
     syncGame(result.g);
     if (result.toast) pushTileAction(result.toast.text, result.toast.color, game.currentPlayer);
@@ -974,6 +994,7 @@ export default function AcquireGame() {
   }
 
   function handleFoundChain(chain) {
+    if (game.currentPlayer !== myPlayerIndex) return;
     const result = applyFoundChain(game, chain);
     syncGame(result.g);
     if (result.toast) pushTileAction(result.toast.text, result.toast.color, game.currentPlayer);
@@ -981,6 +1002,7 @@ export default function AcquireGame() {
   }
 
   function handleBuyStocks(cart, endAfter = false) {
+    if (game.currentPlayer !== myPlayerIndex) return;
     const result = applyBuyStocks(game, cart);
     const nextGame = endAfter ? finishGame(result.g) : result.g;
     syncGame(nextGame);
@@ -989,6 +1011,7 @@ export default function AcquireGame() {
 
   function handleMergerConfirm() {
     const mi = game.mergerInfo;
+    if (mi.playerIndex !== myPlayerIndex) return; // not your seat's merger to resolve
     const total = (mergerChoice.sell || 0) + (mergerChoice.trade || 0);
     const shares = game.stocks[mi.playerIndex][mi.defunct] || 0;
     if (total > shares) return;
@@ -999,24 +1022,30 @@ export default function AcquireGame() {
   }
 
   function handleDismissAnnouncement() {
+    const placer = game.players[game.currentPlayer];
+    const canDismiss = placer?.type === "human" ? (game.currentPlayer === myPlayerIndex) : (myPlayerIndex != null);
+    if (!canDismiss) return;
     const result = applyDismissAnnouncement(game);
     syncGame(result.g);
     if (result.toast) pushToast(result.toast.text, result.toast.color, game.currentPlayer);
   }
 
   function handleChooseSurvivor(survivor) {
+    if (game.currentPlayer !== myPlayerIndex) return;
     const result = applyChooseSurvivor(game, survivor);
     syncGame(result.g);
     if (result.toast) pushTileAction(result.toast.text, result.toast.color, game.currentPlayer);
   }
 
   function handleRevealDead(tile) {
+    if (game.currentPlayer !== myPlayerIndex) return;
     // Reveal the dead tile to all players, wait for confirm to discard
     syncGame(g => ({ ...g, phase: "revealDead", deadTile: tile }));
     pushTileAction(`Dead tile revealed: ${tileLabel(tile)}`, "#e74c3c", game.currentPlayer);
   }
 
   function handleConfirmDead() {
+    if (game.currentPlayer !== myPlayerIndex) return;
     const tile = game.deadTile;
     const pi = game.currentPlayer;
     const newDeck = [...game.deck];
@@ -1077,18 +1106,41 @@ export default function AcquireGame() {
         </div>
       </div>
 
+      {/* Whose turn banner */}
+      {game.phase !== "gameOver" && (() => {
+        const actingP = game.players[actingIndex];
+        const myTurn = isHuman; // already computed: actingIndex === myPlayerIndex && human
+        return (
+          <div style={{
+            padding: "8px 24px",
+            background: myTurn ? "#1a3d1a" : "#1a1a2e",
+            borderBottom: `2px solid ${myTurn ? "#2ecc71" : "#2a2a3a"}`,
+            display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+          }}>
+            <span style={{
+              width: 8, height: 8, borderRadius: "50%",
+              background: myTurn ? "#2ecc71" : "#555",
+              boxShadow: myTurn ? "0 0 8px #2ecc71" : "none",
+            }} />
+            <span style={{ fontSize: 13, fontWeight: 700, color: myTurn ? "#2ecc71" : "#888", letterSpacing: 1 }}>
+              {myTurn ? "YOUR TURN" : `${actingP?.name}'S TURN${actingP?.type === "ai" ? " (AI)" : ""}`}
+            </span>
+          </div>
+        );
+      })()}
+
       <div style={styles.body}>
         {/* Board */}
         <div style={styles.boardWrap}>
-          <Board game={game} selectedTile={selectedTile} onTileClick={handleTileClick} animTile={animTile} />
+          <Board game={game} selectedTile={selectedTile} onTileClick={handleTileClick} animTile={animTile} myPlayerIndex={myPlayerIndex} />
           <ChainLegend chainSizes={game.chainSizes} stockBank={game.stockBank} />
         </div>
 
         {/* Sidebar */}
         <div style={styles.sidebar}>
-          {showScoreboard && <Scoreboard game={game} onClose={() => setShowScoreboard(false)} />}
+          {showScoreboard && <Scoreboard game={game} onClose={() => setShowScoreboard(false)} myPlayerIndex={myPlayerIndex} />}
           <TurnPanel
-            game={game} isHuman={isHuman} aiThinking={aiThinking}
+            game={game} isHuman={isHuman} myPlayerIndex={myPlayerIndex} aiThinking={aiThinking}
             selectedTile={selectedTile} onTileClick={handleTileClick}
             onPlaceTile={handlePlaceTile}
             selectedChain={selectedChain} setSelectedChain={setSelectedChain}
@@ -1109,9 +1161,11 @@ export default function AcquireGame() {
 }
 
 // ─── BOARD ────────────────────────────────────────────────────────────────────
-function Board({ game, selectedTile, onTileClick, animTile }) {
-  const isHuman = game.players[game.currentPlayer]?.type === "human";
-  const inHand = isHuman ? (game.hands[game.currentPlayer] || []) : [];
+function Board({ game, selectedTile, onTileClick, animTile, myPlayerIndex }) {
+  // ALWAYS show your own hand tiles, regardless of whose turn it is —
+  // but only allow CLICKING them when it's actually your turn to place.
+  const inHand = myPlayerIndex != null ? (game.hands[myPlayerIndex] || []) : [];
+  const isMyTurnToPlace = game.phase === "placeTile" && game.currentPlayer === myPlayerIndex;
   const [popup, setPopup] = useState(null); // { chain, x, y }
 
   return (
@@ -1156,21 +1210,20 @@ function Board({ game, selectedTile, onTileClick, animTile }) {
 
           return (
             <div key={id}
-              onClick={() => inMyHand && game.phase === "placeTile" && onTileClick(id)}
               style={{
                 ...styles.cell,
                 background: bg,
                 border,
-                cursor: chain ? "pointer" : inMyHand && game.phase === "placeTile" ? "pointer" : "default",
+                cursor: chain ? "pointer" : (inMyHand && isMyTurnToPlace) ? "pointer" : "default",
                 transform: isAnim ? "scale(1.3)" : "scale(1)",
                 transition: "transform 0.3s, background 0.3s",
                 boxShadow: shadow,
               }}
               onClick={e => {
                 if (chain) { e.stopPropagation(); setPopup(p => p?.chain === chain ? null : { chain }); }
-                else if (inMyHand && game.phase === "placeTile") onTileClick(id);
+                else if (inMyHand && isMyTurnToPlace) onTileClick(id);
               }}>
-              <span style={{ fontSize: 8, color: labelColor, fontWeight: 700, userSelect: "none" }}>
+              <span style={{ fontSize: 11, color: labelColor, fontWeight: 700, userSelect: "none" }}>
                 {tileLabel(id)}
               </span>
             </div>
@@ -1254,11 +1307,13 @@ function ChainLegend({ chainSizes, stockBank }) {
 }
 
 // ─── TURN PANEL ───────────────────────────────────────────────────────────────
-function TurnPanel({ game, isHuman, aiThinking, selectedTile, onTileClick, onPlaceTile, selectedChain, setSelectedChain, onFoundChain, onChooseSurvivor, onDismissAnnouncement, onRevealDead, onConfirmDead, onBuyStocks, mergerChoice, setMergerChoice, onMergerConfirm, onEndGame }) {
+function TurnPanel({ game, isHuman, myPlayerIndex, aiThinking, selectedTile, onTileClick, onPlaceTile, selectedChain, setSelectedChain, onFoundChain, onChooseSurvivor, onDismissAnnouncement, onRevealDead, onConfirmDead, onBuyStocks, mergerChoice, setMergerChoice, onMergerConfirm, onEndGame }) {
   const cp = game.currentPlayer;
   const cpPlayer = game.players[cp];
-  const hand = game.hands[cp] || [];
-  const money = game.money[cp];
+  // Only ever read hand/money for OUR OWN seat — never the acting player's seat directly,
+  // since in multiplayer the acting player might be a different human on a different device.
+  const hand = isHuman ? (game.hands[myPlayerIndex] || []) : [];
+  const money = isHuman ? game.money[myPlayerIndex] : (game.money[cp] || 0);
 
   const [buyCart, setBuyCart] = useState({});
   const buyCartRef = useRef({});
@@ -1347,7 +1402,7 @@ function TurnPanel({ game, isHuman, aiThinking, selectedTile, onTileClick, onPla
       {isHuman && (
         <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 8 }}>
           {CHAINS.map(c => {
-            const n = game.stocks[cp][c] || 0;
+            const n = (game.stocks[myPlayerIndex] && game.stocks[myPlayerIndex][c]) || 0;
             return n > 0 ? (
               <span key={c} style={{ fontSize: 11, padding: "2px 6px", borderRadius: 4, background: CHAIN_COLORS[c] + "33", border: `1px solid ${CHAIN_COLORS[c]}88`, color: "#fff" }}>
                 {c.slice(0,3)} ×{n}
@@ -1447,18 +1502,32 @@ function TurnPanel({ game, isHuman, aiThinking, selectedTile, onTileClick, onPla
                 })}
               </div>
             )}
-            <button style={{ ...styles.btnPrimary, width: "100%" }} onClick={onDismissAnnouncement}>
-              {ann.holders.length > 0 ? "Resolve Stockholders →" : "Continue →"}
-            </button>
+            {(() => {
+              const tilePlacer = game.players[game.currentPlayer];
+              const placerIsHuman = tilePlacer?.type === "human";
+              // If the tile-placer is AI, no device "owns" this screen — let any connected human dismiss it.
+              // If the tile-placer is human, only THAT seat's device can dismiss (keeps turn flow clear).
+              const canDismiss = placerIsHuman ? (game.currentPlayer === myPlayerIndex) : (myPlayerIndex != null);
+              return canDismiss ? (
+                <button style={{ ...styles.btnPrimary, width: "100%" }} onClick={onDismissAnnouncement}>
+                  {ann.holders.length > 0 ? "Resolve Stockholders →" : "Continue →"}
+                </button>
+              ) : (
+                <div style={{ color: "#888", fontSize: 12, textAlign: "center", padding: "8px 0" }}>
+                  Waiting for {tilePlacer?.name} to continue…
+                </div>
+              );
+            })()}
           </div>
         );
       })()}
 
       {game.phase === "merger" && game.mergerInfo && (() => {
         const mi = game.mergerInfo;
-        const isMine = mi.playerIndex != null && game.players[mi.playerIndex]?.type === "human";
+        // Only this device's own seat can see/control the merger resolution sliders
+        const isMine = mi.playerIndex != null && mi.playerIndex === myPlayerIndex && game.players[mi.playerIndex]?.type === "human";
         const mergePlayer = game.players[mi.playerIndex];
-        const shares = game.stocks[mi.playerIndex]?.[mi.defunct] || 0;
+        const shares = isMine ? (game.stocks[myPlayerIndex]?.[mi.defunct] || 0) : 0;
         const price = stockPrice(mi.defunct, game.chainSizes[mi.defunct]);
         const maxTrade = Math.floor(shares / 2) * 2;
         const survivorAvail = (game.stockBank[mi.survivor] || 0);
@@ -1544,24 +1613,33 @@ function TurnPanel({ game, isHuman, aiThinking, selectedTile, onTileClick, onPla
         </div>
       )}
 
-      {!isHuman && game.phase !== "gameOver" && (
-        <div style={{ color: "#888", fontSize: 13, textAlign: "center", padding: 12 }}>
-          {aiThinking ? "🤖 AI is thinking…" : "Waiting for AI…"}
-        </div>
-      )}
+      {!isHuman && game.phase !== "gameOver" && (() => {
+        const actingIdx = (game.phase === "merger" && game.mergerInfo?.playerIndex != null)
+          ? game.mergerInfo.playerIndex
+          : game.currentPlayer;
+        const actingP = game.players[actingIdx];
+        const isAi = actingP?.type === "ai";
+        return (
+          <div style={{ color: "#888", fontSize: 13, textAlign: "center", padding: 12 }}>
+            {isAi
+              ? (aiThinking ? `🤖 ${actingP.name} is thinking…` : `🤖 ${actingP.name}'s turn…`)
+              : `Waiting for ${actingP?.name || "player"}…`}
+          </div>
+        );
+      })()}
     </div>
   );
 }
 
 // ─── SCOREBOARD ───────────────────────────────────────────────────────────────
-function Scoreboard({ game, onClose }) {
-  const humanIndices = new Set(game.players.map((p, i) => p.type === "human" ? i : -1).filter(i => i >= 0));
+function Scoreboard({ game, onClose, myPlayerIndex }) {
   return (
     <div style={{ ...styles.panel, marginBottom: 8 }}>
       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
         <span style={{ fontWeight: 700, color: "#f4c542" }}>Scoreboard</span>
         <button style={{ background: "none", border: "none", color: "#888", cursor: "pointer" }} onClick={onClose}>✕</button>
       </div>
+      <div style={{ fontSize: 10, color: "#555", marginBottom: 6 }}>Only your own holdings are visible — others' are private until game end.</div>
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
         <thead>
           <tr>
@@ -1571,13 +1649,16 @@ function Scoreboard({ game, onClose }) {
           </tr>
         </thead>
         <tbody>
-          {game.players.map((p, i) => (
-            <tr key={i} style={{ background: i === game.currentPlayer ? "#1a2a1a" : "transparent" }}>
-              <td style={styles.td}>{p.name}</td>
-              <td style={styles.td}>{humanIndices.has(i) ? `$${game.money[i].toLocaleString()}` : <span style={{ color: "#333" }}>—</span>}</td>
-              {CHAINS.map(c => <td key={c} style={styles.td}>{humanIndices.has(i) ? (game.stocks[i][c] || 0) : <span style={{ color: "#333" }}>—</span>}</td>)}
-            </tr>
-          ))}
+          {game.players.map((p, i) => {
+            const isMe = i === myPlayerIndex;
+            return (
+              <tr key={i} style={{ background: i === game.currentPlayer ? "#1a2a1a" : "transparent" }}>
+                <td style={styles.td}>{p.name}{isMe ? " (you)" : ""}</td>
+                <td style={styles.td}>{isMe ? `$${game.money[i].toLocaleString()}` : <span style={{ color: "#333" }}>—</span>}</td>
+                {CHAINS.map(c => <td key={c} style={styles.td}>{isMe ? (game.stocks[i][c] || 0) : <span style={{ color: "#333" }}>—</span>}</td>)}
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>
@@ -1663,23 +1744,27 @@ function LobbyScreen({ onCreate, onJoin, connectionStatus }) {
 
           {joinSeats && (
             <div style={{ marginTop: 16, borderTop: "1px solid #1a2a1a", paddingTop: 14 }}>
-              <div style={{ fontSize: 12, color: "#888", marginBottom: 8 }}>Which seat are you?</div>
-              {joinSeats.map((p, i) => (
-                <button key={i}
-                  disabled={p.type !== "human"}
-                  style={{
-                    ...styles.tileBtn, width: "100%", marginBottom: 6, padding: "10px 12px",
-                    opacity: p.type === "human" ? 1 : 0.3,
-                    background: p.type === "human" ? "#1a3d28" : "#222",
-                    border: p.type === "human" ? "1px solid #2ecc71" : "1px solid #333",
-                    color: p.type === "human" ? "#2ecc71" : "#666",
-                    fontSize: 14, cursor: p.type === "human" ? "pointer" : "not-allowed",
-                  }}
-                  onClick={() => onJoin(joinCode, i)}
-                >
-                  {p.name} {p.type === "ai" ? `(AI — ${p.difficulty})` : ""}
-                </button>
-              ))}
+              <div style={{ fontSize: 12, color: "#888", marginBottom: 8 }}>Which seat are you? (Pick YOUR OWN name — not the creator's, unless that's you)</div>
+              {joinSeats.map((p, i) => {
+                const claimed = p.claimed === true;
+                const pickable = p.type === "human" && !claimed;
+                return (
+                  <button key={i}
+                    disabled={!pickable}
+                    style={{
+                      ...styles.tileBtn, width: "100%", marginBottom: 6, padding: "10px 12px",
+                      opacity: pickable ? 1 : 0.3,
+                      background: pickable ? "#1a3d28" : "#222",
+                      border: pickable ? "1px solid #2ecc71" : "1px solid #333",
+                      color: pickable ? "#2ecc71" : "#666",
+                      fontSize: 14, cursor: pickable ? "pointer" : "not-allowed",
+                    }}
+                    onClick={async () => { if (pickable) { const ok = await onJoin(joinCode, i); if (!ok) setJoinError("That seat was just taken — pick another."); } }}
+                  >
+                    {p.name} {p.type === "ai" ? `(AI — ${p.difficulty})` : claimed ? "(already joined)" : ""}
+                  </button>
+                );
+              })}
             </div>
           )}
         </div>
@@ -1710,6 +1795,8 @@ function SetupScreen({ onStart, onBack, multiplayer }) {
     { name: "HAL", type: "ai", difficulty: "hobbyist" },
     { name: "DEEP", type: "ai", difficulty: "pro" },
   ]);
+  const [startingMoney, setStartingMoney] = useState(6000);
+  const [startingPlayer, setStartingPlayer] = useState("random"); // "random" or a player index
 
   function addPlayer() {
     if (players.length >= 6) return;
@@ -1766,8 +1853,53 @@ function SetupScreen({ onStart, onBack, multiplayer }) {
           🟡 Hobbyist — grows chains, spreads holdings<br/>
           🔴 Pro — hunts majorities, trades on mergers
         </div>
+
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ fontSize: 12, color: "#888", marginBottom: 6 }}>Starting cash</div>
+          <div style={{ display: "flex", gap: 6 }}>
+            {[6000, 7000, 8000].map(amt => (
+              <button key={amt} onClick={() => setStartingMoney(amt)}
+                style={{
+                  ...styles.tileBtn, flex: 1, padding: "8px 0", fontSize: 13,
+                  background: startingMoney === amt ? "#f4c542" : "#1a2a1a",
+                  border: startingMoney === amt ? "2px solid #f4c542" : "1px solid #333",
+                  color: startingMoney === amt ? "#000" : "#ccc",
+                }}>
+                ${amt.toLocaleString()}
+              </button>
+            ))}
+          </div>
+          <div style={{ fontSize: 10, color: "#555", marginTop: 4 }}>$6,000 is standard rules · $7,000 is a common house rule</div>
+        </div>
+
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ fontSize: 12, color: "#888", marginBottom: 6 }}>Who goes first</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            <button onClick={() => setStartingPlayer("random")}
+              style={{
+                ...styles.tileBtn, padding: "8px 14px", fontSize: 13,
+                background: startingPlayer === "random" ? "#f4c542" : "#1a2a1a",
+                border: startingPlayer === "random" ? "2px solid #f4c542" : "1px solid #333",
+                color: startingPlayer === "random" ? "#000" : "#ccc",
+              }}>
+              🎲 Random
+            </button>
+            {players.map((p, i) => (
+              <button key={i} onClick={() => setStartingPlayer(i)}
+                style={{
+                  ...styles.tileBtn, padding: "8px 14px", fontSize: 13,
+                  background: startingPlayer === i ? "#f4c542" : "#1a2a1a",
+                  border: startingPlayer === i ? "2px solid #f4c542" : "1px solid #333",
+                  color: startingPlayer === i ? "#000" : "#ccc",
+                }}>
+                {p.name}
+              </button>
+            ))}
+          </div>
+        </div>
+
         {players.length < 6 && <button style={{ ...styles.btnSecondary, width: "100%", marginBottom: 12 }} onClick={addPlayer}>+ Add Player</button>}
-        <button style={{ ...styles.btnPrimary, width: "100%", fontSize: 16, padding: "12px 0", marginBottom: multiplayer ? 10 : 0 }} onClick={() => onStart(players)}>
+        <button style={{ ...styles.btnPrimary, width: "100%", fontSize: 16, padding: "12px 0", marginBottom: multiplayer ? 10 : 0 }} onClick={() => onStart(players, startingMoney, startingPlayer)}>
           {multiplayer ? "Create Room" : "Start Game"}
         </button>
         {multiplayer && onBack && (
@@ -1786,8 +1918,8 @@ const styles = {
   headerRight: { display: "flex", gap: 8 },
   body: { display: "flex", flex: 1, gap: 0, overflow: "hidden" },
   boardWrap: { flex: "0 0 auto", padding: "12px", display: "flex", flexDirection: "column", gap: 8 },
-  boardGrid: { display: "grid", gridTemplateColumns: `repeat(${COLS}, 44px)`, gridTemplateRows: `repeat(${ROWS}, 36px)`, gap: 2 },
-  cell: { display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 3, transition: "background 0.3s, transform 0.3s" },
+  boardGrid: { display: "grid", gridTemplateColumns: `repeat(${COLS}, 58px)`, gridTemplateRows: `repeat(${ROWS}, 48px)`, gap: 3 },
+  cell: { display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 4, transition: "background 0.3s, transform 0.3s" },
   legend: { display: "flex", flexDirection: "column", gap: 3 },
   legendItem: { display: "flex", alignItems: "center", gap: 6, fontSize: 11 },
   sidebar: { flex: 1, display: "flex", flexDirection: "column", gap: 0, borderLeft: "1px solid #1a2a1a", overflowY: "auto", minWidth: 280, maxWidth: 380 },
