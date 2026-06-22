@@ -519,6 +519,7 @@ export default function AcquireGame() {
   const [aiThinking, setAiThinking] = useState(false);
   const [animTile, setAnimTile] = useState(null);
   const [showScoreboard, setShowScoreboard] = useState(false);
+  const [mobileView, setMobileView] = useState("board"); // "board" | "actions" — only matters under 1024px
   const [playerActions, setPlayerActions] = useState({}); // playerIndex → {tile, stocks}
 
   // ── Multiplayer room state ──────────────────────────────────────────────────
@@ -1090,6 +1091,12 @@ export default function AcquireGame() {
   // "isHuman" here means: is THIS device's seat the one currently allowed to act
   const isHuman = actingIndex === myPlayerIndex && game.players[actingIndex]?.type === "human";
 
+  // On mobile, automatically jump to the Actions view the moment it becomes your turn,
+  // so you don't have to remember to tap the toggle yourself.
+  useEffect(() => {
+    if (isHuman) setMobileView("actions");
+  }, [isHuman]);
+
   return (
     <div style={styles.root}>
       <div style={styles.header}>
@@ -1131,12 +1138,12 @@ export default function AcquireGame() {
 
       <div style={styles.body}>
         {/* Board */}
-        <div style={styles.boardWrap}>
+        <div style={styles.boardWrap} className={`mobile-panel ${mobileView === "board" ? "mobile-visible" : "mobile-hidden"}`}>
           <Board game={game} selectedTile={selectedTile} onTileClick={handleTileClick} animTile={animTile} myPlayerIndex={myPlayerIndex} />
         </div>
 
         {/* Sidebar */}
-        <div style={styles.sidebar}>
+        <div style={styles.sidebar} className={`mobile-panel ${mobileView === "actions" ? "mobile-visible" : "mobile-hidden"}`}>
           {showScoreboard && <Scoreboard game={game} onClose={() => setShowScoreboard(false)} myPlayerIndex={myPlayerIndex} />}
           <TurnPanel
             game={game} isHuman={isHuman} myPlayerIndex={myPlayerIndex} aiThinking={aiThinking}
@@ -1155,6 +1162,22 @@ export default function AcquireGame() {
           <PlayerActionLog game={game} playerActions={playerActions} />
         </div>
       </div>
+
+      {/* Mobile-only floating toggle — hidden on desktop via CSS */}
+      <button
+        className="mobile-toggle-btn"
+        onClick={() => setMobileView(v => v === "board" ? "actions" : "board")}
+        style={{
+          position: "fixed", bottom: 20, right: 20, zIndex: 200,
+          background: "#f4c542", color: "#000", border: "none", borderRadius: 30,
+          padding: "14px 22px", fontWeight: 700, fontSize: 14,
+          fontFamily: "'Courier New', monospace",
+          boxShadow: "0 4px 16px #000a",
+          cursor: "pointer",
+        }}
+      >
+        {mobileView === "board" ? "📋 View Actions" : "🗺️ View Board"}
+      </button>
     </div>
   );
 }
