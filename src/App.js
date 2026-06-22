@@ -381,6 +381,45 @@ function aiChooseMergerAction(mergerInfo, playerStocks, playerMoney, chainSizes,
   }
 }
 
+// How close is this chain to a likely merger, weighted toward neighbors that are BIGGER
+// than us (since the bigger chain is the one that survives and absorbs the smaller one).
+// Purely descriptive — what it MEANS for strategy depends on whether we hold position.
+// Returns 0+ : 0 = isolated/far from any other chain, higher = more imminent/dangerous merge.
+function mergeProximity(chain, chainTileIds, chainMap, chainSizes, board) {
+  if (chainSizes[chain] >= 11) return 0; // safe chains can't be merged away
+  let proximity = 0;
+  const mySize = chainSizes[chain] || 0;
+  const neighborChains = new Set();
+
+  for (const id of chainTileIds) {
+    for (const adj of adjacentTiles(id)) {
+      const adjChain = chainMap[adj];
+      if (adjChain && adjChain !== chain) neighborChains.add(adjChain);
+      // An empty tile bordering us that ALSO borders another chain is a live merge trigger —
+      // anyone's next tile placement there could set off the merger.
+      if (!board[adj]) {
+        for (const adj2 of adjacentTiles(adj)) {
+          const adj2Chain = chainMap[adj2];
+          if (adj2Chain && adj2Chain !== chain) {
+            const otherSize = chainSizes[adj2Chain] || 0;
+            proximity += otherSize > mySize ? 3 : 1; // bigger neighbor = more urgent signal
+          }
+        }
+      }
+    }
+  }
+
+  // Direct adjacency (already touching another chain) means a merger could already
+  // be one tile placement away, right now — the strongest signal, especially when
+  // that neighbor is bigger than us and would be the one to survive.
+  neighborChains.forEach(nc => {
+    const otherSize = chainSizes[nc] || 0;
+    proximity += otherSize > mySize ? 10 : otherSize === mySize ? 6 : 3;
+  });
+
+  return proximity;
+}
+
 function aiBuyStocks(playerMoney, chainSizes, stockBank, playerStocks, allStocks, players, playerIndex, difficulty, chainMap, board) {
   const buys = {};
   let money = playerMoney, slots = 3;
@@ -399,11 +438,25 @@ function aiBuyStocks(playerMoney, chainSizes, stockBank, playerStocks, allStocks
   }
 
   if (difficulty === "hobbyist") {
-    const active = CHAINS.filter(c => chainSizes[c] > 0 && (stockBank[c] || 0) > 0)
-      .sort((a, b) => stockPrice(a, chainSizes[a]) - stockPrice(b, chainSizes[b]));
-    for (const chain of active) {
-      if (slots <= 0) break;
+    const active = CHAINS.filter(c => chainSizes[c] > 0 && (stockBank[c] || 0) > 0);
+    const scored = active.map(chain => {
       const price = stockPrice(chain, chainSizes[chain]);
+      const myShares = playerStocks[chain] || 0;
+      const chainTileIds = chainMap ? Object.keys(chainMap).filter(id => chainMap[id] === chain).map(Number) : [];
+      const proximity = (chainMap && board) ? mergeProximity(chain, chainTileIds, chainMap, chainSizes, board) : 0;
+      // Simplified version of the Pro merge logic: notice when a chain is sitting next to
+      // a bigger neighbor (likely merger coming) and lean toward it, especially if we
+      // already hold a share there — a basic version of "secure the payout before it merges."
+      let bonus = 0;
+      if (proximity > 0 && myShares > 0) bonus = 15; // already in it, merger looks close — good moment to add
+      else if (proximity > 0 && (stockBank[chain] || 0) >= 15) bonus = 8; // bank still wide open, still worth a look
+      // Cheaper chains still preferred as a baseline, same as before — just nudged by merge awareness
+      const score = bonus - price / 100;
+      return { chain, price, score };
+    }).sort((a, b) => b.score - a.score);
+
+    for (const { chain, price } of scored) {
+      if (slots <= 0) break;
       if (price <= 0 || price > money) continue;
       buys[chain] = 1; money -= price; slots--;
     }
@@ -440,6 +493,44 @@ function aiBuyStocks(playerMoney, chainSizes, stockBank, playerStocks, allStocks
 
     // Tier value (Continental/Imperial worth more long term)
     score += CHAIN_TIERS[chain] * 8;
+
+    // Merge proximity: how close is this chain to a likely merger right now, and is the
+    // threat coming from a BIGGER neighbor (the chain that would actually survive)?
+    const chainTileIdsForMerge = chainMap ? Object.keys(chainMap).filter(id => chainMap[id] === chain).map(Number) : [];
+    const proximity = (chainMap && board) ? mergeProximity(chain, chainTileIdsForMerge, chainMap, chainSizes, board) : 0;
+    const isIsolated = proximity === 0;
+    const hasPosition = myShares > 0;
+    const sharesAvailable = stockBank[chain] || 0; // how many are still up for grabs in the bank
+
+    if (isIsolated) {
+      // Sitting alone with no neighbors — nothing is forcing our hand right now.
+      // Not a bad chain, just no urgency yet relative to chains where the clock is ticking.
+      score -= 10;
+    } else {
+      // Not isolated — a merger here looks plausible soon. Urgency depends on:
+      //  1) do we already have a foothold (even just 1 founder's share)?
+      //  2) are there still enough shares in the bank to actually fight for the lead?
+      // 24/25 shares still available means the race hasn't really started yet —
+      // having 0 or 1 shares right now isn't "behind," it's just early.
+      const raceIsOpen = sharesAvailable >= 15; // most shares still unclaimed
+      const raceIsTight = sharesAvailable >= 5 && sharesAvailable < 15;
+      const raceIsNearlyOver = sharesAvailable < 5;
+
+      if (hasPosition || raceIsOpen) {
+        // We already hold a stake, OR the bank is still wide open so jumping in now
+        // is still a real, winnable play. This is the highest-value moment to buy —
+        // lock majority before the merger actually triggers and pays out.
+        score += raceIsOpen ? 26 : 22;
+      } else if (raceIsTight) {
+        // Shares are thinning out and we hold nothing — still worth competing for a
+        // minority cut, but less urgent than getting in early.
+        score += 12;
+      } else if (raceIsNearlyOver) {
+        // Almost everything is already claimed and we have nothing — realistically
+        // too late to meaningfully change the outcome here.
+        score -= size >= 5 ? 0 : 8; // bigger chains still carry some residual value even late
+      }
+    }
 
     // Majority battle scoring
     if (myShares === 0 && oppMax === 0) {
