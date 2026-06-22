@@ -1857,7 +1857,7 @@ function SetupScreen({ onStart, onBack, multiplayer }) {
         <div style={{ marginBottom: 16 }}>
           <div style={{ fontSize: 12, color: "#888", marginBottom: 6 }}>Starting cash</div>
           <div style={{ display: "flex", gap: 6 }}>
-            {[6000, 7000, 8000].map(amt => (
+            {[6000, 7000].map(amt => (
               <button key={amt} onClick={() => setStartingMoney(amt)}
                 style={{
                   ...styles.tileBtn, flex: 1, padding: "8px 0", fontSize: 13,
@@ -1916,8 +1916,8 @@ const styles = {
   header: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 16px", borderBottom: "1px solid #1a2a1a", background: "#0d130d" },
   logo: { fontSize: 22, fontWeight: 900, letterSpacing: 6, color: "#f4c542", fontFamily: "Georgia, serif" },
   headerRight: { display: "flex", gap: 8 },
-  body: { display: "flex", flex: 1, gap: 0, overflow: "hidden" },
-  boardWrap: { flex: "0 0 auto", padding: "12px", display: "flex", flexDirection: "column", gap: 8 },
+  body: { display: "flex", flex: 1, gap: 0, overflow: "auto", flexWrap: "wrap" },
+  boardWrap: { flex: "0 0 auto", padding: "12px", display: "flex", flexDirection: "column", gap: 8, overflowX: "auto", maxWidth: "100vw" },
   boardGrid: { display: "grid", gridTemplateColumns: `repeat(${COLS}, 58px)`, gridTemplateRows: `repeat(${ROWS}, 48px)`, gap: 3 },
   cell: { display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 4, transition: "background 0.3s, transform 0.3s" },
   legend: { display: "flex", flexDirection: "column", gap: 3 },
