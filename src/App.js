@@ -1916,7 +1916,7 @@ function SetupScreen({ onStart, onBack, multiplayer }) {
 
 // ─── STYLES ───────────────────────────────────────────────────────────────────
 const styles = {
-  root: { background: "#12121f", minHeight: "100vh", height: "100%", color: "#fff", fontFamily: "'Courier New', monospace", display: "flex", flexDirection: "column" },
+  root: { background: "#12121f", minHeight: "100vh", color: "#fff", fontFamily: "'Courier New', monospace", display: "flex", flexDirection: "column" },
   header: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 16px", borderBottom: "1px solid #1a2a1a", background: "#0d130d" },
   logo: { fontSize: 22, fontWeight: 900, letterSpacing: 6, color: "#f4c542", fontFamily: "Georgia, serif" },
   headerRight: { display: "flex", gap: 8 },
