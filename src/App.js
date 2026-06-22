@@ -1133,7 +1133,6 @@ export default function AcquireGame() {
         {/* Board */}
         <div style={styles.boardWrap}>
           <Board game={game} selectedTile={selectedTile} onTileClick={handleTileClick} animTile={animTile} myPlayerIndex={myPlayerIndex} />
-          <ChainLegend chainSizes={game.chainSizes} stockBank={game.stockBank} />
         </div>
 
         {/* Sidebar */}
@@ -1288,20 +1287,23 @@ function Board({ game, selectedTile, onTileClick, animTile, myPlayerIndex }) {
 // ─── CHAIN LEGEND ─────────────────────────────────────────────────────────────
 function ChainLegend({ chainSizes, stockBank }) {
   return (
-    <div style={styles.legend}>
-      {CHAINS.map(c => {
-        const size = chainSizes[c] || 0;
-        const price = stockPrice(c, size);
-        return (
-          <div key={c} style={{ ...styles.legendItem, opacity: size > 0 ? 1 : 0.35 }}>
-            <div style={{ width: 10, height: 10, borderRadius: 2, background: CHAIN_COLORS[c], flexShrink: 0 }} />
-            <span style={{ fontSize: 11, color: "#ccc", minWidth: 80 }}>{c}</span>
-            <span style={{ fontSize: 10, color: "#888" }}>{size > 0 ? `${size} tiles` : "—"}</span>
-            <span style={{ fontSize: 10, color: "#f4c542", marginLeft: "auto" }}>{price > 0 ? `$${price}` : "—"}</span>
-            <span style={{ fontSize: 10, color: "#aaa" }}>🏦{stockBank[c] ?? 25}</span>
-          </div>
-        );
-      })}
+    <div style={{ marginBottom: 10 }}>
+      <div style={{ fontSize: 10, color: "#555", textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>Chains</div>
+      <div style={styles.legend}>
+        {CHAINS.map(c => {
+          const size = chainSizes[c] || 0;
+          const price = stockPrice(c, size);
+          return (
+            <div key={c} style={{ ...styles.legendItem, opacity: size > 0 ? 1 : 0.35 }}>
+              <div style={{ width: 9, height: 9, borderRadius: 2, background: CHAIN_COLORS[c], flexShrink: 0 }} />
+              <span style={{ fontSize: 10, color: "#ccc", minWidth: 72 }}>{c}</span>
+              <span style={{ fontSize: 9, color: "#888" }}>{size > 0 ? `${size}t` : "—"}</span>
+              <span style={{ fontSize: 9, color: "#f4c542", marginLeft: "auto" }}>{price > 0 ? `$${price}` : "—"}</span>
+              <span style={{ fontSize: 9, color: "#aaa" }}>🏦{stockBank[c] ?? 25}</span>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -1411,6 +1413,8 @@ function TurnPanel({ game, isHuman, myPlayerIndex, aiThinking, selectedTile, onT
           })}
         </div>
       )}
+
+      <ChainLegend chainSizes={game.chainSizes} stockBank={game.stockBank} />
 
       {/* Phases */}
       {game.phase === "placeTile" && isHuman && (
@@ -1912,7 +1916,7 @@ function SetupScreen({ onStart, onBack, multiplayer }) {
 
 // ─── STYLES ───────────────────────────────────────────────────────────────────
 const styles = {
-  root: { background: "#12121f", minHeight: "100vh", color: "#fff", fontFamily: "'Courier New', monospace", display: "flex", flexDirection: "column" },
+  root: { background: "#12121f", minHeight: "100vh", height: "100%", color: "#fff", fontFamily: "'Courier New', monospace", display: "flex", flexDirection: "column" },
   header: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 16px", borderBottom: "1px solid #1a2a1a", background: "#0d130d" },
   logo: { fontSize: 22, fontWeight: 900, letterSpacing: 6, color: "#f4c542", fontFamily: "Georgia, serif" },
   headerRight: { display: "flex", gap: 8 },
