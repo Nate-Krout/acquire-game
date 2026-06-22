@@ -1214,10 +1214,17 @@ function Board({ game, selectedTile, onTileClick, animTile, myPlayerIndex }) {
   const inHand = myPlayerIndex != null ? (game.hands[myPlayerIndex] || []) : [];
   const isMyTurnToPlace = game.phase === "placeTile" && game.currentPlayer === myPlayerIndex;
   const [popup, setPopup] = useState(null); // { chain, x, y }
+  const [pendingTile, setPendingTile] = useState(null); // tile awaiting a second confirming tap
+
+  // Clear any pending confirmation if it's no longer our turn (e.g. someone else acted,
+  // or we just placed and moved to the next phase)
+  useEffect(() => {
+    if (!isMyTurnToPlace) setPendingTile(null);
+  }, [isMyTurnToPlace, game.phase, game.currentPlayer]);
 
   return (
     <div style={{ position: "relative" }}>
-      <div style={styles.boardGrid} onClick={e => { if (e.target === e.currentTarget) setPopup(null); }}>
+      <div style={styles.boardGrid} onClick={e => { if (e.target === e.currentTarget) { setPopup(null); setPendingTile(null); } }}>
       {Array.from({ length: ROWS }, (_, r) =>
         Array.from({ length: COLS }, (_, c) => {
           const id = tileId(r, c);
@@ -1225,6 +1232,7 @@ function Board({ game, selectedTile, onTileClick, animTile, myPlayerIndex }) {
           const placed = game.board[id];
           const inMyHand = inHand.includes(id);
           const isSelected = selectedTile === id;
+          const isPending = pendingTile === id;
           const isAnim = animTile === id;
 
           let bg, border, labelColor, shadow;
@@ -1238,6 +1246,11 @@ function Board({ game, selectedTile, onTileClick, animTile, myPlayerIndex }) {
             border = "1px solid #666";
             labelColor = "#ffffffaa";
             shadow = "none";
+          } else if (isPending) {
+            bg = "#f4c542";
+            border = "2px solid #fff";
+            labelColor = "#000";
+            shadow = "0 0 14px #f4c542cc";
           } else if (isSelected) {
             bg = "#2ecc71";
             border = "2px solid #fff";
@@ -1262,13 +1275,21 @@ function Board({ game, selectedTile, onTileClick, animTile, myPlayerIndex }) {
                 background: bg,
                 border,
                 cursor: chain ? "pointer" : (inMyHand && isMyTurnToPlace) ? "pointer" : "default",
-                transform: isAnim ? "scale(1.3)" : "scale(1)",
+                transform: isAnim ? "scale(1.3)" : isPending ? "scale(1.12)" : "scale(1)",
                 transition: "transform 0.3s, background 0.3s",
                 boxShadow: shadow,
               }}
               onClick={e => {
-                if (chain) { e.stopPropagation(); setPopup(p => p?.chain === chain ? null : { chain }); }
-                else if (inMyHand && isMyTurnToPlace) onTileClick(id);
+                if (chain) { e.stopPropagation(); setPopup(p => p?.chain === chain ? null : { chain }); return; }
+                if (!inMyHand || !isMyTurnToPlace) return;
+                if (isPending) {
+                  // Second tap on the same tile — confirm placement
+                  onTileClick(id);
+                  setPendingTile(null);
+                } else {
+                  // First tap — mark as pending, await confirming second tap
+                  setPendingTile(id);
+                }
               }}>
               <span style={{ fontSize: 11, color: labelColor, fontWeight: 700, userSelect: "none" }}>
                 {tileLabel(id)}
@@ -1278,6 +1299,18 @@ function Board({ game, selectedTile, onTileClick, animTile, myPlayerIndex }) {
         })
       )}
       </div>
+
+      {/* Pending placement hint */}
+      {pendingTile != null && (
+        <div style={{
+          position: "absolute", top: 8, left: "50%", transform: "translateX(-50%)",
+          background: "#f4c542", color: "#000", padding: "6px 14px", borderRadius: 6,
+          fontSize: 12, fontWeight: 700, fontFamily: "'Courier New', monospace",
+          boxShadow: "0 2px 10px #000a", zIndex: 40, whiteSpace: "nowrap",
+        }}>
+          Tap {tileLabel(pendingTile)} again to confirm placement
+        </div>
+      )}
 
       {/* Chain popup */}
       {popup && (() => {
