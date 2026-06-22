@@ -12,6 +12,17 @@
         overflow-y: auto;
         touch-action: auto;
       }
+      /* Desktop: lock the app to exactly one viewport, no page-level scrolling needed */
+      @media (min-width: 1024px) {
+        html, body {
+          overflow: hidden;
+          height: 100vh;
+        }
+        #root {
+          height: 100vh;
+          overflow: hidden;
+        }
+      }
     </style>
   </head>
   <body>
