@@ -529,6 +529,18 @@ export default function AcquireGame() {
   const gameRef = useRef(null); // mirrors `game` for use inside callbacks without stale closures
   gameRef.current = game;
 
+  // On mobile, automatically jump to the Actions view the moment it becomes your turn,
+  // so you don't have to remember to tap the toggle yourself. Safe to run even before
+  // game/myPlayerIndex exist — it just won't match anything until they're set.
+  useEffect(() => {
+    if (!game || myPlayerIndex == null) return;
+    const actingIdx = (game.phase === "merger" && game.mergerInfo?.playerIndex != null)
+      ? game.mergerInfo.playerIndex
+      : game.currentPlayer;
+    const myTurn = actingIdx === myPlayerIndex && game.players[actingIdx]?.type === "human";
+    if (myTurn) setMobileView("actions");
+  }, [game, myPlayerIndex]);
+
   // Write a new game state to Supabase. Every device's realtime subscription (including
   // our own) will receive the update and call setGame — so we don't need to setGame here too,
   // though we do it anyway for instant local feedback before the round-trip completes.
@@ -1090,12 +1102,6 @@ export default function AcquireGame() {
     : cp;
   // "isHuman" here means: is THIS device's seat the one currently allowed to act
   const isHuman = actingIndex === myPlayerIndex && game.players[actingIndex]?.type === "human";
-
-  // On mobile, automatically jump to the Actions view the moment it becomes your turn,
-  // so you don't have to remember to tap the toggle yourself.
-  useEffect(() => {
-    if (isHuman) setMobileView("actions");
-  }, [isHuman]);
 
   return (
     <div style={styles.root}>
