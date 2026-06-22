@@ -12,14 +12,27 @@
         overflow-y: auto;
         touch-action: auto;
       }
-      /* Desktop: lock the app to exactly one viewport, no page-level scrolling needed */
+      /* Desktop: lock the app to exactly one viewport, no page-level scrolling needed.
+         Mobile (anything under 1024px) is intentionally left unconstrained so the
+         browser's native pinch-zoom and pan/scroll work normally. */
       @media (min-width: 1024px) {
         html, body {
           overflow: hidden;
           height: 100vh;
+          width: 100vw;
         }
         #root {
           height: 100vh;
+          width: 100vw;
+          overflow: hidden;
+          display: flex;
+          flex-direction: column;
+        }
+        #root > div {
+          flex: 1;
+          display: flex;
+          flex-direction: column;
+          min-height: 0; /* allow inner flex children to actually shrink/scroll instead of overflowing */
           overflow: hidden;
         }
       }
