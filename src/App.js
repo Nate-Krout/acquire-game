@@ -1300,17 +1300,32 @@ function Board({ game, selectedTile, onTileClick, animTile, myPlayerIndex }) {
       )}
       </div>
 
-      {/* Pending placement hint */}
-      {pendingTile != null && (
-        <div style={{
-          position: "absolute", top: 8, left: "50%", transform: "translateX(-50%)",
-          background: "#f4c542", color: "#000", padding: "6px 14px", borderRadius: 6,
-          fontSize: 12, fontWeight: 700, fontFamily: "'Courier New', monospace",
-          boxShadow: "0 2px 10px #000a", zIndex: 40, whiteSpace: "nowrap",
-        }}>
-          Tap {tileLabel(pendingTile)} again to confirm placement
-        </div>
-      )}
+      {/* Pending placement hint — positioned near the actual tile, flips above/below to stay on-board */}
+      {pendingTile != null && (() => {
+        const r = Math.floor(pendingTile / COLS);
+        const c = pendingTile % COLS;
+        const cellW = 58, cellH = 48, gap = 3;
+        const boardWidth = COLS * (cellW + gap) - gap;
+        const cellCenterX = c * (cellW + gap) + cellW / 2;
+        const cellTop = r * (cellH + gap);
+        const cellBottom = cellTop + cellH;
+        const isTopHalf = r < ROWS / 2;
+        const top = isTopHalf ? cellBottom + 8 : cellTop - 36;
+        // Clamp so the banner (roughly 220px wide) never spills past the board's edges
+        const halfBanner = 110;
+        const clampedLeft = Math.min(Math.max(cellCenterX, halfBanner), boardWidth - halfBanner);
+        return (
+          <div style={{
+            position: "absolute", top, left: clampedLeft, transform: "translateX(-50%)",
+            background: "#f4c542", color: "#000", padding: "6px 14px", borderRadius: 6,
+            fontSize: 12, fontWeight: 700, fontFamily: "'Courier New', monospace",
+            boxShadow: "0 2px 10px #000a", zIndex: 40, whiteSpace: "nowrap",
+            pointerEvents: "none",
+          }}>
+            Tap {tileLabel(pendingTile)} again to confirm placement
+          </div>
+        );
+      })()}
 
       {/* Chain popup */}
       {popup && (() => {
