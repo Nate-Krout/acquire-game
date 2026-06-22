@@ -995,6 +995,25 @@ export default function AcquireGame() {
     setSelectedTile(tile);
   }
 
+  // Tapping a tile directly on the board places it immediately — no separate confirm step needed,
+  // since tapping the exact board square IS the confirmation.
+  function handleBoardTilePlace(tile) {
+    if (!game || game.phase !== "placeTile") return;
+    if (game.currentPlayer !== myPlayerIndex) return;
+    if (game.players[game.currentPlayer].type === "ai") return;
+    if (!game.hands[myPlayerIndex].includes(tile)) return;
+    const result = applyPlaceTile(game, tile);
+    syncGame(result.g);
+    if (result.toast) pushTileAction(result.toast.text, result.toast.color, game.currentPlayer);
+    setSelectedTile(null);
+    setAnimTile(tile);
+    setTimeout(() => setAnimTile(null), 600);
+    // The next step (founding a chain, resolving a merger, or buying stocks) lives in
+    // the Actions panel — jump there automatically so mobile players aren't stuck looking
+    // at the board with nothing left to tap.
+    setMobileView("actions");
+  }
+
   function handlePlaceTile() {
     if (selectedTile === null) return;
     if (game.currentPlayer !== myPlayerIndex) return; // not your turn
@@ -1145,7 +1164,7 @@ export default function AcquireGame() {
       <div style={styles.body}>
         {/* Board */}
         <div style={styles.boardWrap} className={`mobile-panel ${mobileView === "board" ? "mobile-visible" : "mobile-hidden"}`}>
-          <Board game={game} selectedTile={selectedTile} onTileClick={handleTileClick} animTile={animTile} myPlayerIndex={myPlayerIndex} />
+          <Board game={game} selectedTile={selectedTile} onTileClick={handleBoardTilePlace} animTile={animTile} myPlayerIndex={myPlayerIndex} />
         </div>
 
         {/* Sidebar */}
